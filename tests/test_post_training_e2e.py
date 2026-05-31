@@ -492,6 +492,126 @@ class TestEmbeddingSaveLoadE2E:
                     f"Embedding {i} norm is {norms[i].item()}, expected ~1.0"
 
 
+# ===========================================================================
+# LLM quantized-base merge E2E (regression for GH #15)
+# ===========================================================================
+
+LLM_4BIT_MODEL = "mlx-community/Qwen3-0.6B-4bit"
+
+
+def _build_perturbed_llm():
+    """Load a 4-bit base, apply LoRA, and inject a small nonzero delta into
+    ``lora_b`` (init is zero -> no delta) to simulate a weak fine-tune.
+
+    Returns ``(wrapper, tokenizer)`` with LoRA applied and active.
+    """
+    from mlx_tune import FastLanguageModel
+
+    model, tok = FastLanguageModel.from_pretrained(model_name=LLM_4BIT_MODEL)
+    model = FastLanguageModel.get_peft_model(
+        model, r=8,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        lora_alpha=16, lora_dropout=0.0,
+    )
+    model._apply_lora()
+    mx.random.seed(0)
+    for _, mod in model.model.named_modules():
+        if hasattr(mod, "lora_b"):
+            mod.lora_b = mx.random.normal(mod.lora_b.shape) * 0.02
+    mx.eval(model.model.parameters())
+    return model, tok
+
+
+def _last_token_logits(model, text="The capital of France is"):
+    ids = mx.array(model.tokenizer.encode(text))[None]
+    out = model.model(ids)
+    logits = out.logits if hasattr(out, "logits") else out
+    mx.eval(logits)
+    return logits[0, -1]
+
+
+def _first_lora_target_type(model):
+    """Class name of the first reloaded q_proj-style linear."""
+    for name, mod in model.model.named_modules():
+        if name.endswith("q_proj") and hasattr(mod, "weight"):
+            return type(mod).__name__
+    return None
+
+
+@pytest.mark.slow
+class TestLLMQuantizedMergeE2E:
+    """save_pretrained_merged on a 4-bit base must preserve the fine-tune.
+
+    Regression for GH #15: merging a LoRA adapter into a quantized base and
+    re-quantizing (merged_4bit) rounds a weak delta away, so the reloaded model
+    reverts to the base. merged_16bit (default) must dequantize and keep it.
+    """
+
+    def test_merged_16bit_preserves_finetune(self):
+        from mlx_tune import FastLanguageModel
+
+        model, _ = _build_perturbed_llm()
+        ref = _last_token_logits(model)
+        ref_top = int(mx.argmax(ref).item())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model.save_pretrained_merged(tmpdir, model.tokenizer,
+                                         save_method="merged_16bit")
+
+            # Config must NOT advertise quantization (weights are fp now).
+            cfg = json.load(open(Path(tmpdir) / "config.json"))
+            assert "quantization" not in cfg
+            assert "quantization_config" not in cfg
+
+            reloaded, _ = FastLanguageModel.from_pretrained(model_name=tmpdir)
+            # Fused layers are full-precision Linear, not QuantizedLinear.
+            assert _first_lora_target_type(reloaded) == "Linear"
+
+            # Reloaded logits reproduce the in-memory fine-tuned model.
+            l16 = _last_token_logits(reloaded)
+            assert int(mx.argmax(l16).item()) == ref_top
+            assert bool(mx.allclose(ref, l16, atol=1.0, rtol=0).item())
+
+    def test_merged_4bit_keeps_quantization(self):
+        """merged_4bit stays quantized on disk (back-compat unchanged)."""
+        from mlx_tune import FastLanguageModel
+
+        model, _ = _build_perturbed_llm()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model.save_pretrained_merged(tmpdir, model.tokenizer,
+                                         save_method="merged_4bit")
+            cfg = json.load(open(Path(tmpdir) / "config.json"))
+            assert "quantization" in cfg
+
+            reloaded, _ = FastLanguageModel.from_pretrained(model_name=tmpdir)
+            assert _first_lora_target_type(reloaded) == "QuantizedLinear"
+
+    def test_16bit_closer_to_reference_than_4bit(self):
+        """The fix's core property: 16-bit merge keeps more of the fine-tune
+        signal than the re-quantizing 4-bit merge."""
+        from mlx_tune import FastLanguageModel
+
+        def dist(a, b):
+            return float(mx.sqrt(mx.sum((a - b) ** 2)).item())
+
+        m16, _ = _build_perturbed_llm()
+        ref = _last_token_logits(m16)
+        with tempfile.TemporaryDirectory() as d16:
+            m16.save_pretrained_merged(d16, m16.tokenizer,
+                                       save_method="merged_16bit")
+            r16, _ = FastLanguageModel.from_pretrained(model_name=d16)
+            d_16 = dist(ref, _last_token_logits(r16))
+
+        m4, _ = _build_perturbed_llm()
+        with tempfile.TemporaryDirectory() as d4:
+            m4.save_pretrained_merged(d4, m4.tokenizer,
+                                      save_method="merged_4bit")
+            r4, _ = FastLanguageModel.from_pretrained(model_name=d4)
+            d_4 = dist(ref, _last_token_logits(r4))
+
+        assert d_16 < d_4, f"16-bit dist {d_16} should be < 4-bit dist {d_4}"
+
+
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short", "-m", "slow"])

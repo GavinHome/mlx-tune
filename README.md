@@ -78,6 +78,8 @@ Local Mac (MLX-Tune)       →     Cloud GPU (Unsloth)
 
 ## Project Status
 
+> 🩹 **v0.5.1 (patch)** — `save_pretrained_merged` on a 4-bit base now preserves the fine-tune ([#15](https://github.com/ARahim3/mlx-tune/issues/15)).
+
 > 🚀 **v0.5.0 — Faster, leaner training across every trainer.**
 >
 > Headline numbers on an M4 Pro Mac, Qwen3-class models:
@@ -176,9 +178,16 @@ trainer.train()
 
 # Save (same API as Unsloth!)
 model.save_pretrained("lora_model")  # Adapters only
-model.save_pretrained_merged("merged", tokenizer)  # Full model
+model.save_pretrained_merged("merged", tokenizer)  # Full model (16-bit)
 model.save_pretrained_gguf("model", tokenizer)  # GGUF (see note below)
 ```
+
+> [!NOTE]
+> **Merging into a 4-bit base**: the default `save_method="merged_16bit"` dequantizes
+> the base before fusing, so the fine-tune is preserved exactly. `save_method="merged_4bit"`
+> keeps the base quantized and re-quantizes the fused weights — smaller on disk, but a weak
+> LoRA delta (low LR / few steps) can be rounded away. Prefer the 16-bit default, or keep the
+> adapter and use `model.load_adapter(...)` at inference time.
 
 > [!NOTE]
 > **GGUF Export**: Works with non-quantized base models. If using a 4-bit model (like above),

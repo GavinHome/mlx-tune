@@ -244,7 +244,7 @@ model.save_pretrained("lora_model")</code></pre>
           <div class="api-signature">
             <span class="api-name">model.save_pretrained_merged</span>(<span class="api-param">output_dir</span>, <span class="api-param">tokenizer</span>, <span class="api-param">save_method</span><span class="api-default">="merged_16bit"</span>)
           </div>
-          <p>Fuse LoRA weights into the base model and save the full merged model.</p>
+          <p>Fuse LoRA weights into the base model and save the full merged model. With a quantized base, the default <code>save_method="merged_16bit"</code> dequantizes before fusing so the fine-tune is preserved exactly; <code>"merged_4bit"</code> keeps the base quantized and re-quantizes the fused weights (smaller, but a weak LoRA delta can be rounded away &mdash; prefer the 16-bit default or keep the adapter and use <code>load_adapter()</code>).</p>
 
           <h4>model.save_pretrained_gguf()</h4>
           <div class="api-signature">

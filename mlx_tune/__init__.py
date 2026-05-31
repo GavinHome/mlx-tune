@@ -17,7 +17,7 @@ Supported Training Methods:
 - OCR (Optical Character Recognition) fine-tuning
 """
 
-__version__ = "0.5.0"  # Perf cycle (Sessions 35-38): fused log-prob, KV-cached GRPO sampling, @mx.compile + collator bucketing, GC propagation, prompt-prefix KV-cache share (DPO/ORPO/SimPO 1.5-1.9× per-sample at bs=1), GRPO prompt-cache across N completions, DPO fixed-reference logprobs, SFT val_batches knob, off-by-one length-mask fix
+__version__ = "0.5.1"  # GH #15: save_pretrained_merged on a quantized base now honors save_method — merged_16bit (default) dequantizes so the fine-tune isn't rounded away by re-quantization. (0.5.0: perf cycle — fused log-prob, KV-cached GRPO sampling, @mx.compile + collator bucketing, GC propagation, prompt-prefix KV-cache share, DPO fixed-reference logprobs, SFT val_batches knob, off-by-one length-mask fix)
 
 from mlx_tune.model import FastLanguageModel
 from mlx_tune.trainer import (

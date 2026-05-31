@@ -213,6 +213,7 @@ def save_model_hf_format(
     output_dir: str,
     push_to_hub: bool = False,
     repo_id: Optional[str] = None,
+    save_method: str = "merged_16bit",
     **kwargs
 ):
     """
@@ -227,10 +228,25 @@ def save_model_hf_format(
         output_dir: Directory to save model
         push_to_hub: Whether to upload to HuggingFace Hub
         repo_id: HuggingFace repo ID (e.g., "username/model-name")
-        **kwargs: Additional arguments for pushing to hub
+        save_method: Unsloth-compatible merge mode. ``"merged_16bit"`` (default)
+            dequantizes a quantized base and saves a full-precision merged model
+            so the fine-tune is preserved exactly. ``"merged_4bit"`` keeps the
+            base quantization and re-quantizes the fused weights (smaller on disk,
+            but small LoRA deltas can be rounded away — see note below). Pass an
+            explicit ``dequantize=`` to override the mode-derived default.
+        **kwargs: Additional arguments (``dequantize``, hub upload options).
+
+    Note:
+        Merging a LoRA adapter into a quantized base and re-quantizing
+        (``merged_4bit``) rounds the merged weights back onto the low-bit grid.
+        When the fine-tune is weak (low LR / few steps) the delta can be smaller
+        than the quantization step and effectively disappear, so the reloaded
+        model behaves like the base. ``merged_16bit`` avoids this by saving
+        full-precision weights; alternatively keep the adapter separate and use
+        ``model.load_adapter(...)`` at inference time.
 
     Examples:
-        >>> # Save locally in HF format
+        >>> # Save locally in HF format (16-bit merge — fine-tune preserved)
         >>> save_model_hf_format(model, tokenizer, "my-finetuned-model")
         >>>
         >>> # Save and push to HuggingFace Hub
@@ -247,10 +263,19 @@ def save_model_hf_format(
 
     print(f"Saving merged model to {output_dir}...")
 
+    # Resolve whether to dequantize. An explicit ``dequantize=`` always wins;
+    # otherwise derive it from the Unsloth-style save_method:
+    #   merged_16bit -> dequantize=True  (full-precision merge, no rounding loss)
+    #   merged_4bit  -> dequantize=False (keep base quant, re-quantize fused weights)
+    if "dequantize" in kwargs:
+        dequantize = bool(kwargs.pop("dequantize"))
+    else:
+        dequantize = save_method != "merged_4bit"
+
     # For MLX models, we need to use mlx_lm utilities to save
     # This will save in a format compatible with HuggingFace
     try:
-        from mlx_lm.utils import save_model
+        from mlx_lm.utils import save_model, save_config, dequantize_model
         from mlx.utils import tree_unflatten
 
         # Get the underlying MLX model
@@ -259,37 +284,56 @@ def save_model_hf_format(
         else:
             actual_model = model
 
-        # CRITICAL: Fuse LoRA adapters into base weights before saving
-        # Without this, LoRA layers are saved as-is and won't load properly
+        # CRITICAL: Fuse LoRA adapters into base weights before saving.
+        # Without this, LoRA layers are saved as-is and won't load properly.
+        # When dequantize=True, fuse() returns plain nn.Linear for the fused
+        # (LoRA-wrapped) layers; the *non*-LoRA quantized layers are converted
+        # separately by dequantize_model() below.
         fused_linears = [
-            (n, m.fuse(dequantize=kwargs.get('dequantize', False)))
+            (n, m.fuse(dequantize=dequantize))
             for n, m in actual_model.named_modules()
             if hasattr(m, "fuse")
         ]
 
         if fused_linears:
-            print(f"  Fusing {len(fused_linears)} LoRA layers into base model...")
+            print(f"  Fusing {len(fused_linears)} LoRA layers into base model "
+                  f"({'16-bit / dequantized' if dequantize else '4-bit / re-quantized'})...")
             actual_model.update_modules(tree_unflatten(fused_linears))
         else:
             print("  No LoRA layers to fuse (saving base model as-is)")
 
-        # mlx_lm.utils.save_model only takes (save_path, model) - tokenizer is saved separately
-        save_model(str(output_dir), actual_model)
+        # Resolve the config dict (carries the `quantization` field for a
+        # quantized base). Prefer the in-memory config captured at load time.
+        config = None
+        if getattr(model, 'config', None):
+            config = dict(model.config)
+        else:
+            src = getattr(model, 'model_path', None) or getattr(model, 'model_name', None)
+            if src and Path(src).exists():
+                src_config = Path(src) / "config.json"
+                if src_config.exists():
+                    with open(src_config) as f:
+                        config = json.load(f)
+
+        if dequantize:
+            # Convert any remaining quantized layers (embeddings, untargeted
+            # linears, lm_head) to full precision, and drop the quantization
+            # metadata so the fp16 weights reload cleanly. Mirrors mlx_lm.fuse.
+            actual_model = dequantize_model(actual_model)
+            if config is not None:
+                config.pop("quantization", None)
+                config.pop("quantization_config", None)
+
+        # Save weights. donate_model=False keeps the in-memory model usable
+        # after the call (e.g. for follow-up inference).
+        save_model(str(output_dir), actual_model, donate_model=False)
 
         # Save tokenizer separately
         tokenizer.save_pretrained(str(output_dir))
 
-        # Save config.json if available (needed for loading and GGUF export)
-        if hasattr(model, 'config') and model.config is not None:
-            config_path = output_dir / "config.json"
-            with open(config_path, 'w') as f:
-                json.dump(model.config, f, indent=2)
-        elif hasattr(model, 'model_path') and model.model_path:
-            # Try to copy config from original model path
-            src_config = Path(model.model_path) / "config.json"
-            if src_config.exists():
-                import shutil
-                shutil.copy(src_config, output_dir / "config.json")
+        # Save config.json (needed for loading and GGUF export)
+        if config is not None:
+            save_config(config, config_path=output_dir / "config.json")
 
         print(f"✓ Model saved to {output_dir}")
 

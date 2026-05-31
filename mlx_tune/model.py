@@ -828,8 +828,19 @@ class MLXModelWrapper:
         Args:
             output_dir: Directory to save merged model
             tokenizer: Tokenizer to save
-            save_method: Save method ("merged_16bit", "merged_4bit", etc.)
-            **kwargs: Additional options
+            save_method: Merge mode (Unsloth-compatible). ``"merged_16bit"``
+                (default) dequantizes a quantized base and saves a full-precision
+                merged model, preserving the fine-tune exactly. ``"merged_4bit"``
+                keeps the base quantization and re-quantizes the fused weights —
+                smaller on disk, but a weak LoRA delta can be rounded away. Pass
+                ``dequantize=True/False`` to override the mode-derived default.
+            **kwargs: Additional options (``dequantize``, hub upload options).
+
+        Note:
+            For a quantized base, ``merged_4bit`` re-quantizes the fused weights
+            and can lose a small fine-tune signal. Use the default
+            ``merged_16bit``, or keep the adapter and call
+            ``model.load_adapter(...)`` at inference time.
 
         Example:
             >>> model.save_pretrained_merged("merged_model", tokenizer)
@@ -837,7 +848,9 @@ class MLXModelWrapper:
         from mlx_tune.trainer import save_model_hf_format
 
         print(f"Saving merged model to {output_dir}...")
-        save_model_hf_format(self, tokenizer, output_dir, **kwargs)
+        save_model_hf_format(
+            self, tokenizer, output_dir, save_method=save_method, **kwargs
+        )
 
     def save_pretrained_gguf(
         self,

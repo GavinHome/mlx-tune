@@ -174,6 +174,13 @@ MLX_TUNE_DISABLE_COMPILE=1 python examples/21_dpo_preference_tuning.py</code></p
       <h3>Loss values shifted slightly after upgrading to 0.5.0?</h3>
       <p>0.5.0 fixes a small bug in length masking: earlier versions accidentally included one pad token&rsquo;s log-probability in every sample. The fix doesn&rsquo;t change DPO loss in practice (the spurious term cancelled in the log-ratio), but ORPO, KTO, SimPO, and GRPO loss curves shift slightly downward versus 0.4.x. The optimum and gradient direction are unchanged. If you compare loss curves across versions, expect a small offset.</p>
 
+      <h3>Merged model lost the fine-tune / answers like the base model?</h3>
+      <p>Fixed in <strong>0.5.1</strong> (<a href="https://github.com/ARahim3/mlx-tune/issues/15" target="_blank" rel="noopener">#15</a>). When you fine-tune a <strong>quantized (4-bit)</strong> base and call <code>save_pretrained_merged(...)</code>, older versions re-quantized the fused weights back to 4-bit. A weak LoRA delta (low learning rate or few steps) can be smaller than the quantization step and gets rounded away &mdash; so the reloaded merged model behaves like the base, even though inference right after training looked correct. From 0.5.1 the default <code>save_method="merged_16bit"</code> dequantizes the base before fusing, preserving the fine-tune exactly. Upgrade with <code>uv pip install -U mlx-tune</code>. If you must stay on an older version, keep the adapter and load it at inference time:</p>
+      <div class="code-block-wrapper"><button class="copy-btn">Copy</button>
+<pre><code class="language-python">model, tokenizer = FastLanguageModel.from_pretrained("mlx-community/Llama-3.2-1B-Instruct-4bit")
+model.load_adapter("my_adapters")   # full-precision adapter over the frozen 4-bit base</code></pre>
+      </div>
+
       <!-- GGUF Export -->
       <h2 id="gguf">GGUF Export from Quantized Models</h2>
       <p>GGUF export (<code>save_pretrained_gguf</code>) doesn&rsquo;t work with quantized (4-bit) base models. This is a <a href="https://github.com/ml-explore/mlx-lm/issues/353" target="_blank">known mlx-lm limitation</a>, not an <code>mlx-tune</code> bug.</p>
